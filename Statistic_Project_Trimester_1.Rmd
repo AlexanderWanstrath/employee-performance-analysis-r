@@ -1,0 +1,1678 @@
+---
+title: "Employee Performance Analysis"
+author: "Alexander Wanstrath"
+date: "2025-10-07"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Load Packages
+
+```{r}
+# Load packages
+library(tidyverse)
+library(stargazer)
+library(ggthemes)
+library(haven)
+library(skimr)
+library(labelled)
+library(infer)
+library(janitor)
+library(lubridate)
+library(corrr)
+library(ISOweek)
+library(GGally)
+```
+
+# Load Data
+
+```{r}
+## --- Load Data ---
+
+# Load Stata files (place them in a folder called data/)
+attitude_labeled <- read_dta("data/attitude_labeled.dta")
+endperiod_outcomes_labeled <- read_dta("data/endperiod_outcomes_labeled.dta")
+performance_labeled <- read_dta("data/performance_labeled.dta")
+summary_volunteer_labeled <- read_dta("data/summary_volunteer_labeled.dta")
+wage_new_labeled <- read_dta("data/wage_new_labeled.dta")
+
+# Check if Tables are tibble
+is_tibble(attitude_labeled)
+is_tibble(endperiod_outcomes_labeled)
+is_tibble(performance_labeled)
+is_tibble(summary_volunteer_labeled)
+is_tibble(wage_new_labeled)
+```
+
+# Data Cleaning
+
+## Attitude
+
+### Pre-Analysis
+
+```{r}
+glimpse(attitude_labeled)
+skim(attitude_labeled) 
+stargazer(as.data.frame(attitude_labeled), type = "text")
+```
+
+### Data Manipulation
+
+```{r}
+# Save labels
+labels_attitude_labeled <- var_label(attitude_labeled)
+
+## Change values into negative values in column negative
+attitude_labeled <- attitude_labeled %>%
+  mutate(negative = if_else(negative > 0, -negative, negative))
+
+# restore labels
+var_label(attitude_labeled) <- labels_attitude_labeled
+
+# delete on same personid and year_week
+attitude_labeled <- attitude_labeled %>%
+  distinct(personid, year_week, .keep_all=TRUE)
+
+### Check if Dataset is clean
+skim(attitude_labeled)
+
+
+```
+
+## Endperiod
+
+### Pre-Analysis
+
+```{r}
+glimpse(endperiod_outcomes_labeled)
+skim(endperiod_outcomes_labeled) #  --> n_missing 2 for cost of commute
+stargazer(as.data.frame(endperiod_outcomes_labeled), type = "text")
+```
+
+### Data Manipulation
+
+```{r}
+# Save labels
+labels_endperiod_outcomes_labeled <- var_label(endperiod_outcomes_labeled)
+
+### only numeric values - change into character
+
+endperiod_outcomes_labeled <- endperiod_outcomes_labeled %>%
+  mutate(
+    costofcommute = as.character(costofcommute), # convert to character for string cleaning
+    costofcommute = if_else(is.na(costofcommute), NA_character_, costofcommute),# replace NA with NA
+    costofcommute = na_if(trimws(costofcommute), "-"), # replace - with NA - trimws - removes leading whitespace
+    costofcommute = gsub(',','.', costofcommute), # replace ',' with '.'
+    costofcommute = parse_number(costofcommute) # extract numbers
+  )
+
+### Change to factor and different labels
+endperiod_outcomes_labeled <- endperiod_outcomes_labeled %>% 
+  mutate(promote_switch = factor(
+    x = promote_switch, levels = c(0, 1), 
+    labels = c("not promoted", "promoted")
+  )) 
+
+endperiod_outcomes_labeled <- endperiod_outcomes_labeled %>% 
+  mutate(quitjob = factor(
+    x = quitjob, levels = c(0, 1), 
+    labels = c("stayed", "quit")
+  )) 
+
+# delete duplicates on same personid
+endperiod_outcomes_labeled <- endperiod_outcomes_labeled %>%
+  distinct(personid, .keep_all=TRUE)
+
+# restore labels
+var_label(endperiod_outcomes_labeled) <- labels_endperiod_outcomes_labeled
+
+### Check if Dataset is clean
+skim(endperiod_outcomes_labeled)
+```
+
+## Performance
+
+### Pre-Analysis
+
+```{r}
+glimpse(performance_labeled)
+skim(performance_labeled) 
+stargazer(as.data.frame(performance_labeled), type = "text")
+```
+
+### Data Manipulation
+
+```{r}
+# Save labels
+labels_performance_labeled <- var_label(performance_labeled)
+
+#Year Week - different format
+performance_labeled <- performance_labeled %>% 
+  mutate(year_week = gsub("[^0-9]", "",year_week)) # keep only numbers
+
+# empty rows in column perform1 and phonecall
+# phonecallraw - has some NAs
+# logphonecall, logcallpersec, logcalllength and logcall_dayworked - has some empty cells and NAs
+
+# Date - different format
+performance_labeled <- performance_labeled %>%
+  mutate(
+    date = as.Date(parse_date_time(date, orders = c("ymd", "mdy", "dmy", 
+                                                    "Ymd HMS", "Ymd HM", "Ymd H", 
+                                                    "mdy HMS", "dmy HMS"))))
+
+performance_labeled %>%
+  filter(is.na(date)) %>%
+  distinct(date) # Check whether my code has not found some entries -> found all
+
+# perform1, phonecall, logphonecall --> "," into "."
+performance_labeled <- performance_labeled %>%
+  mutate(across(
+    c(logdaysworked, phonecall, logphonecall, 
+      logcallpersec, logcalllength, logcall_dayworked), # do the following for all theses tables
+    ~ gsub(",", ".", .) # replace ',' with '.'
+  ))
+
+# Standardization of "-"
+performance_labeled <- performance_labeled %>%
+  mutate(across(where(is.character), ~gsub("[−–—‒-﹣－]", "-", .))) # replace all the different - with - for all characters
+
+# Convert empty cells into NAs
+performance_labeled <- performance_labeled %>%
+  mutate(across(where(is.character), ~na_if(trimws(.x), ""))) # only on character columns
+
+# Convert "NA" into NAs
+performance_labeled <- performance_labeled %>%
+  mutate(across(where(is.character), ~na_if(trimws(.x), "NA"))) # only on character columns
+
+# Convert "-" into NAs
+performance_labeled <- performance_labeled %>%
+  mutate(across(where(is.character), ~na_if(trimws(.x), "-"))) # only on character columns
+
+# mutate columns into numeric
+performance_labeled <- performance_labeled %>% 
+  mutate(across(
+    c(perform1, phonecall, phonecallraw, logphonecall, logcallpersec, logcalllength, logcall_dayworked, logdaysworked),
+    as.numeric
+  ))
+
+# mutate homethatweek into factor
+performance_labeled <- performance_labeled %>% 
+  mutate(homethatweek = factor(
+    x = homethatweek, levels = c(0, 1), labels = c("not home", "home")
+  )) 
+
+# remove duplicates on same personid, year_week
+performance_labeled <- performance_labeled %>%
+  distinct(personid, year_week, .keep_all=TRUE)
+
+# restore labels
+var_label(performance_labeled) <- labels_performance_labeled
+
+### Check if Dataset is clean
+skim(performance_labeled)
+```
+
+## Volunteer
+
+### Pre-Analysis
+
+```{r}
+glimpse(summary_volunteer_labeled)
+skim(summary_volunteer_labeled) 
+stargazer(as.data.frame(summary_volunteer_labeled), type = "text")
+```
+
+### Data Manipulation
+
+```{r}
+### Save labels
+labels_summary_volunteer_labeled <- var_label(summary_volunteer_labeled)
+
+### Check raw values before recoding
+unique(summary_volunteer_labeled$children)
+unique(summary_volunteer_labeled$bedroom)
+
+### Change children into numeric values only (text values are recoded, not coerced to NA)
+summary_volunteer_labeled <- summary_volunteer_labeled %>%
+  mutate(
+    children = tolower(trimws(as.character(children))),
+    children = case_when(
+      children %in% c("no", "n", "false", "0") ~ 0,
+      children %in% c("yes", "y", "true", "1") ~ 1,
+      TRUE ~ suppressWarnings(as.numeric(children))
+    )
+  )
+
+### Change bedroom into numeric values only (text values are recoded, not coerced to NA)
+summary_volunteer_labeled <- summary_volunteer_labeled %>%
+  mutate(
+    bedroom = tolower(trimws(as.character(bedroom))),
+    bedroom = case_when(
+      bedroom %in% c("no", "n", "false", "0") ~ 0,
+      bedroom %in% c("yes", "y", "true", "1") ~ 1,
+      TRUE ~ suppressWarnings(as.numeric(bedroom))
+    )
+  )
+
+### Change Commute only numeric values 
+summary_volunteer_labeled <- summary_volunteer_labeled %>%
+  mutate(commute = parse_number(as.character(commute))) # extract numbers
+
+### Change Gender to male or female
+summary_volunteer_labeled <- summary_volunteer_labeled %>%
+  mutate(
+    gender = tolower(trimws(gender)),   # everything small + w/o spaces in between
+    gender = case_when(
+      gender %in% c("m", "male", "man") ~ "male",
+      gender %in% c("f", "female", "fem", "w", "woman") ~ "female"
+    )
+  )
+
+### Change Married to married or not married
+summary_volunteer_labeled <- summary_volunteer_labeled %>%
+  mutate(
+    married = tolower(trimws(married)),   # normalize case + spaces
+    married = case_when(
+      married %in% c("yes", "y", "married") ~ "married",
+      married %in% c("no", "n", "not married", "single") ~ "not married"
+    )
+  )
+
+### Change High_edc to high education or no high education
+summary_volunteer_labeled <- summary_volunteer_labeled %>%
+  mutate(
+    high_educ = tolower(trimws(high_educ)),
+    high_educ = case_when(
+      high_educ %in% c("yes", "y") ~ "high education",
+      high_educ %in% c("no", "n")  ~ "no high education",
+      TRUE ~ NA_character_
+    )
+  )
+
+## Age = 1 is a data entry error. We found that people who have a tenure of 41 and 51 months, are between the ages 22 and 34.
+## Therefore, we will change the values where age is 1, to the median age of 29.
+summary_volunteer_labeled <- summary_volunteer_labeled %>%
+  mutate(age = if_else(age == 1, 29, age)) # change age 1 to 29
+
+#Remove decimal numbers for columns age and tenure. Didn't apply to commute as it might be important for the analysis.
+summary_volunteer_labeled <- summary_volunteer_labeled %>%
+  mutate(age = as.integer(age), tenure = as.integer(tenure)) 
+
+# If age is 22 and tenure is 51, change the age to 28, the average age of employees with around 51 months of tenure.
+summary_volunteer_labeled <- summary_volunteer_labeled %>%
+  mutate(age = if_else(age == 22 & tenure == 51, 28L, age))
+
+# If age is 20 and tenure is 150, change the age to 35, the maximum age found in the data.
+summary_volunteer_labeled <- summary_volunteer_labeled %>%
+  mutate(age = if_else(tenure == 150 & age == 20, 35L, age))
+
+# Change Children into Factor
+summary_volunteer_labeled <- summary_volunteer_labeled %>% 
+  mutate(children = factor(
+    x = children,
+    levels = c(0,1),
+    labels = c("no children", "children")
+  ))
+
+# Change Bedroom into Factor  
+summary_volunteer_labeled <- summary_volunteer_labeled %>% 
+  mutate(bedroom = factor(
+    x = bedroom,
+    levels = c(0,1),
+    labels = c("no bedroom", "bedroom")
+  ))
+
+# Change gender into Factor
+summary_volunteer_labeled <- summary_volunteer_labeled %>% 
+  mutate(gender = factor(
+    x = gender, 
+    levels = c("female", "male")
+  ))
+
+# Change married into Factor
+summary_volunteer_labeled <- summary_volunteer_labeled %>% 
+  mutate(married = factor(
+    x = married, 
+    levels = c("not married", "married")
+  ))
+
+# Change high_educ into Factor
+summary_volunteer_labeled <- summary_volunteer_labeled %>% 
+  mutate(high_educ = factor(
+    x = high_educ, 
+    levels = c("no high education", "high education")
+  ))
+
+# Change Personid into numeric
+summary_volunteer_labeled <- summary_volunteer_labeled %>% 
+  mutate(personid = as.numeric(personid))
+
+# delete duplicates on same personid
+summary_volunteer_labeled <- summary_volunteer_labeled %>%
+  distinct(personid, .keep_all=TRUE)
+
+nrow(summary_volunteer_labeled) # check --> correct 135 rows
+
+### restore labels
+var_label(summary_volunteer_labeled) <- labels_summary_volunteer_labeled
+
+### Check if Dataset is clean
+skim(summary_volunteer_labeled) # 4 NAs
+```
+
+## Wage
+
+### Pre-Analysis
+
+```{r}
+glimpse(wage_new_labeled)
+skim(wage_new_labeled) 
+stargazer(as.data.frame(wage_new_labeled), type = "text")
+```
+
+### Data Manipulation
+
+```{r}
+# Save labels
+labels_wage_new_labeled <- var_label(wage_new_labeled)
+
+### only numeric values - change into character
+wage_new_labeled <- wage_new_labeled %>%
+  mutate(
+    basewage = as.character(basewage),         # make sure it's text
+    basewage = trimws(basewage),               # remove leading/trailing spaces
+    basewage = gsub("[^0-9,]", "", basewage),  # keep only digits and commas
+    basewage = gsub(",00$", "", basewage),     # remove trailing ,00
+    basewage = gsub(",", "", basewage),        # remove other commas
+    basewage = as.numeric(basewage)            # back to numeric
+  )
+
+wage_new_labeled <- wage_new_labeled %>%
+  mutate(
+    grosswage = as.character(grosswage), # convert to character for string cleaning
+    grosswage = if_else(is.na(grosswage), NA_character_, grosswage),# replace NA with NA
+    grosswage = na_if(trimws(grosswage), "-"), # replace - with NA - trimws - removes leading whitespace
+    grosswage = gsub(',','.', grosswage), # replace ',' with '.'
+    grosswage = as.numeric(gsub("[^0-9.-]", "", grosswage)) # extract numbers
+  )
+
+wage_new_labeled <- wage_new_labeled %>%
+  mutate(
+    bonustotal = as.character(bonustotal), #create as character - for the following operations
+    bonustotal = if_else(is.na(bonustotal), NA_character_, bonustotal),# replace NA with NA
+    bonustotal = na_if(trimws(bonustotal), "-"), # replace - with NA - trimws - removes leading whitespace
+    bonustotal = gsub(',','.', bonustotal), # replace ',' with '.'
+    bonustotal = as.numeric(gsub("[^0-9.-]", "", bonustotal)) # extract numbers
+  )
+
+wage_new_labeled <- wage_new_labeled %>%
+  mutate(
+    personid = as.character(personid),#create as character - for the following operations
+    personid = trimws(personid), # remove leading and trailing whitespace
+    personid = gsub("[^0-9]", "", personid), # keep only numeric characters
+    personid = sub("^0+", "", personid), # remove leading zeros
+    personid = as.numeric(personid) # convert to numeric
+  )
+
+wage_new_labeled <- wage_new_labeled %>%
+  mutate(
+    wage_month = gsub("[^0-9]", "", wage_month),                     # keep only digits
+    wage_month = substr(wage_month, nchar(wage_month)-5, nchar(wage_month)), # last 6 digits
+    wage_month = if_else(nchar(wage_month) == 5,     # fix 5-digit -> add 0
+                         paste0(substr(wage_month,1,4),"0",substr(wage_month,5,5)),
+                         wage_month),
+    wage_month = if_else(nchar(wage_month) == 4, paste0(wage_month, "01"), false = wage_month), # YYYY -> YYYY01
+    wage_month = paste0(substr(wage_month,1,4), "-", substr(wage_month,5,6)) # format YYYY-MM
+  )
+
+# Change column name wage_month into year_month for merge
+wage_new_labeled <- wage_new_labeled %>%
+  rename(year_month = wage_month)
+
+# remove duplicates on same personid, yearmonth
+wage_new_labeled <- wage_new_labeled %>%
+  distinct(personid, year_month, .keep_all=TRUE)
+
+## Filter if there are NAs in 2 of 3 Columns
+wage_new_labeled <- wage_new_labeled %>% filter(!is.na(basewage) & !is.na(grosswage) | !is.na(bonustotal) & !is.na(grosswage) | !is.na(basewage) & !is.na(bonustotal))
+
+# Calculate Base Wage
+wage_new_labeled <- wage_new_labeled %>% mutate(basewage = ifelse(is.na(basewage), grosswage-bonustotal, basewage))
+
+# Calculate Bonus
+wage_new_labeled <- wage_new_labeled %>% mutate(bonustotal = ifelse(is.na(bonustotal), grosswage-basewage, bonustotal))
+
+# Recalculate Gross Wage
+wage_new_labeled <- wage_new_labeled %>% mutate(grosswage = ifelse(grosswage != bonustotal+basewage, bonustotal+basewage, grosswage))
+
+# Columns as numeric
+wage_new_labeled <- wage_new_labeled %>%
+  mutate(across(c(basewage, grosswage, bonustotal), as.numeric))
+
+### Check if Dataset is clean
+skim(wage_new_labeled) 
+```
+
+# Merge Tables
+
+## Preparation
+
+We must create Year_Month Column for all tables to be able to merge them.
+
+Current Tables:
+
+-   "Performance" has Year_Week –\> we must create a column for Year_month
+
+-   "Volunteer" has no Date –\> No need for adjustments
+
+-   "Wage" has Wage_Month –\> rename it to Year_month
+
+-   "Endperiod" has no Date –\> No need for adjustments
+
+-   "Attitude" has Year week –\> we have to create Year_month
+
+```{r}
+# Performance create new Column - Year_Month
+performance_labeled_monthly <- performance_labeled %>%
+  mutate(
+    year_month = format(
+        ISOweek::ISOweek2date( # Type of Date
+          paste0(substr(as.character(year_week), 1, 4), # Slice Year
+                 "-W", # insert "-"
+                 substr(as.character(year_week), 5, 6), # Slice Week
+                 "-1") # first day of the Week
+        ),
+        "%Y-%m"
+    )
+  )
+
+# Attitude create new Column - Year_Month
+attitude_labeled_cleaned_monthly <- attitude_labeled %>% 
+  mutate(
+    year_month = format(
+        ISOweek::ISOweek2date( # Type of Date
+          paste0(substr(as.character(year_week), 1, 4), # Slice Year
+                 "-W", # insert "-"
+                 substr(as.character(year_week), 5, 6), # Slice Week
+                 "-1") # first day of the Week
+        ),
+        "%Y-%m" # always day one
+    )
+  )
+```
+
+## Merge
+
+1.  Merge tables that have no date
+    -   Tables: Endperiod and Volunteer
+
+```{r}
+# Merge Tables that have no date
+Volunteer_endperiod_merged <- merge(summary_volunteer_labeled, endperiod_outcomes_labeled, by = "personid", all = TRUE)
+```
+
+2.  Merge 1. with one of the tables that have Year_month
+    -   Table: Wage
+
+```{r}
+Volunteer_endperiod_wage_merged <- merge(wage_new_labeled, Volunteer_endperiod_merged, by = "personid", all = TRUE)
+```
+
+3.  Merge 2. with one of the other tables that have Year_month
+    -   Table: Performance
+
+```{r}
+Volunteer_endperiod_wage_performance_merged <- merge(performance_labeled_monthly, Volunteer_endperiod_wage_merged, by = c("personid", "year_month"), all = TRUE)
+```
+
+4.  Merge last table with 3.
+    -   Table: Attitude
+
+```{r}
+all_tables <- merge(attitude_labeled_cleaned_monthly, Volunteer_endperiod_wage_performance_merged, by = c("personid", "year_month", "year_week"), all = TRUE)
+```
+
+## Check Skim
+
+```{r}
+skim(all_tables)
+skim(attitude_labeled_cleaned_monthly) # --> same statistics
+skim(performance_labeled_monthly) # --> same statistics
+skim(endperiod_outcomes_labeled) # --> same statistics
+skim(summary_volunteer_labeled) # --> same statistics
+skim(wage_new_labeled) # --> different stats
+```
+
+# Analysis
+
+## Helper Functions and Person-Level Table
+
+Person-level characteristics (gender, education, promotion, quitting, tenure, age, commute cost) are constant within a person but repeated in every week of the panel. Testing them on the panel would count each person many times and overstate significance. These tests therefore use `person_level`, which has one row per employee.
+
+```{r}
+# Decision and p-value formatting for t-tests
+h0_decision <- function(test, alpha = 0.05) {
+  if (test$p.value < alpha) "Reject H0" else "Fail to reject H0"
+}
+p_fmt <- function(test) format.pval(test$p.value, digits = 3, eps = 0.001)
+
+# One row per employee
+person_level <- all_tables %>%
+  group_by(personid) %>%
+  summarise(
+    avg_performance = mean(perform1, na.rm = TRUE),
+    across(c(age, tenure, commute, costofcommute), ~ first(na.omit(.x))),
+    across(c(gender, married, high_educ, children, bedroom, promote_switch, quitjob),
+           ~ first(na.omit(.x))),
+    .groups = "drop"
+  ) %>%
+  mutate(avg_performance = if_else(is.nan(avg_performance), NA_real_, avg_performance))
+
+nrow(person_level)
+```
+
+## Means Table
+
+Create a table with the mean for each Column per Personid
+
+```{r}
+Mean_Personid <- all_tables %>%
+group_by(personid) %>%
+  summarise(
+    across(
+      where(is.numeric) & !any_of("personid"),
+      \(x) { if (all(is.na(x))) NA_real_ else mean(x, na.rm = TRUE) },
+      .names = "mean_{.col}"
+    ),
+    .groups = "drop"
+  )
+```
+
+## Explore Dataset
+
+```{r}
+skim(all_tables)
+```
+
+## Summary Statistics
+
+```{r}
+stargazer(data.frame(all_tables), type = "text"
+          ,iqr = FALSE, median = TRUE, no.space = TRUE, title = "Summary")
+```
+
+## Correlation Matrix
+
+```{r}
+cor_matrix_all <- all_tables %>% 
+  select(where(is.numeric), -personid)%>% # 
+  correlate(diagonal = 1)
+
+# Format table for a professional presentation
+matrix_all <- cor_matrix_all %>%
+  rearrange() %>%              # rearrange by correlations
+  shave() %>%                  # Shave off the upper triangle for a clean result
+  fashion(decimals = 3)        # Clean presentation
+
+```
+
+## Workforce Profile
+
+### Workers total
+
+```{r}
+plot_workers <- all_tables %>%
+  summarise(total_persons = n_distinct(personid)) %>% 
+  ggplot(aes(x = "All Workers", y = total_persons)) +  
+  geom_col(fill = "#4C78A8", color = "white") +          
+  labs(
+    x = "",
+    y = "Number of Unique Persons",
+    title = "Total Number of Workers"
+  ) +
+  geom_text(aes(label = total_persons), vjust = -0, size = 4) + # Number on top of Bar
+  theme_minimal() +
+    theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
+
+plot_workers
+
+```
+
+### Age
+
+```{r}
+# Histogram Age
+plot_age <- all_tables %>%
+  filter(!is.na(age)) %>% 
+  group_by(personid) %>% 
+  summarise(age = first(age)) %>% 
+  ggplot(aes(x = age)) + 
+  geom_histogram(binwidth = 1, fill = "#4C78A8", color = "white") +
+  labs(x = "Age", y = "Count", title = "Age Distribution") + labs(x="Age") +
+  theme_minimal()
+
+plot_age
+```
+
+```{r}
+Age_Profile <- all_tables %>% 
+  group_by(personid) %>% 
+  summarize( min_age = min(age),
+             max_age = max(age),
+             avg_age = mean(age))
+
+Age_Profile
+```
+
+### Gender
+
+```{r}
+plot_gender <- all_tables %>%
+  filter(!is.na(gender)) %>%
+  group_by(personid) %>% 
+  summarise(gender = first(gender)) %>% 
+  ggplot(aes(x = gender, fill = gender)) + 
+  geom_bar(color = "white") +
+  geom_text(stat = "count", aes(label = after_stat(count)),vjust = 0 , size = 4) +  # <- Text on top of the bar
+  scale_fill_manual(values = c( female ="#4C78A8", male = "#A6CEE3")) +
+  labs(x = "Gender", y = "Count", title = "Gender Distribution") + labs(x="Gender") +
+  theme_minimal() +
+    theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
+
+
+plot_gender
+```
+
+### Education
+
+```{r}
+plot_education <- all_tables %>%
+  filter(!is.na(high_educ)) %>%
+  group_by(personid) %>% 
+  summarise(high_educ = first(high_educ)) %>% 
+  ggplot(aes(x = high_educ, fill = high_educ)) + 
+  geom_bar(color = "white") +
+  geom_text(stat = "count", aes(label = after_stat(count)),vjust = 0 , size = 4) +  # <- Text on top of the bar
+  scale_fill_manual(values = c( "no high education" ="#4C78A8","high education"= "#A6CEE3")) +
+  labs(x = "Education", y = "Count", title = "Education Distribution") + labs(x="Education") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
+
+
+plot_education
+```
+
+### Marital Status
+
+```{r}
+plot_married <- all_tables %>%
+  filter(!is.na(married)) %>%
+  group_by(personid) %>%
+  summarise(married = first(married), .groups = "drop") %>%
+  ggplot(aes(x = married, fill = married)) +
+  geom_bar(color = "white") +
+  geom_text(
+    stat = "count",
+    aes(label = after_stat(count)),
+    vjust = -0.3,   # slightly above the bar
+    size = 4
+  ) +
+  scale_fill_manual(
+    values = c(
+      "not married" = "#4C78A8",
+      "married" = "#A6CEE3"
+    )
+  ) +
+  labs(
+    x = "Marital Status",
+    y = "Count",
+    title = "Marital Status Distribution"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
+
+plot_married
+
+```
+
+## Attitude
+
+### Summary Statistics
+
+```{r}
+stargazer(data.frame(attitude_labeled), type = "text"
+          ,iqr = FALSE, median = TRUE, no.space = TRUE, title = "Summary Attitude")
+```
+
+### Correlation Table
+
+```{r}
+cor_matrix_attitude <- all_tables %>% 
+  select(exhaustion, negative, positive) %>% 
+  correlate(diagonal = 1)
+
+# Format table for a professional presentation
+cor_matrix_attitude %>%
+  rearrange() %>%              # rearrange by correlations
+  shave() %>%                  # Shave off the upper triangle for a clean result
+  fashion(decimals = 3)        # Clean presentation
+```
+
+### Attitude - Histogram
+
+```{r}
+# Histogram Exhaustion
+ggplot( data = all_tables, aes(x = exhaustion)) + geom_histogram( fill = "#4C78A8", color = "white") + labs(x="Exhaustion") +
+  theme_minimal()
+
+# Histogram negative
+ggplot( data = all_tables, aes(x = negative)) + geom_histogram(fill = "#4C78A8", color = "white") + labs(x="Negative") +
+  theme_minimal()
+
+# Histogram positive
+ggplot( data = all_tables, aes(x = positive)) + geom_histogram(fill = "#4C78A8", color = "white") + labs(x="Positive") +
+  theme_minimal()
+```
+
+### Attitude - Scatterplot
+
+```{r}
+# Scatterplot Exhaustion and Negative
+plot.scatter_attitude_negative <-  ggplot(data = all_tables
+                                          , aes(x = exhaustion, y = negative)) +
+  geom_point(size = 1) +
+  theme_few() +
+  labs(  x = "Exhaustion"
+         , y = "Negative"
+         , title = "Relationship between Exhaustion and Negative") +
+  theme(title = element_text(size = 8)) +
+  theme_minimal()
+
+# Add regression Line
+plot.scatter_attitude_negative + stat_smooth(method = lm, colour="blue")
+```
+
+```{r}
+# Scatterplot Exhaustion and positive
+plot.scatter_attitude_positive <-  ggplot(data = all_tables
+                                          , aes(x = exhaustion, y = positive)) +
+  geom_point(size = 1) +
+  theme_few() +
+  labs(  x = "Exhaustion"
+         , y = "Positive"
+         , title = "Relationship between Exhaustion and Positive") +
+  theme(title = element_text(size = 8))
+
+# Add regression Line
+plot.scatter_attitude_positive + stat_smooth(method = lm, colour="blue") +
+  theme_minimal()
+```
+
+```{r}
+# Scatterplot negative and positive
+plot.scatter_attitude_negative_positive <-  ggplot(data = all_tables
+                                                   , aes(x = negative, y = positive)) +
+  geom_point(size = 1) +
+  theme_few() +
+  labs(  x = "Negative"
+         , y = "Positive"
+         , title = "Relationship between negative and Positive") +
+  theme(title = element_text(size = 8)) +
+  theme_minimal()
+
+# Add regression Line
+plot.scatter_attitude_negative_positive + stat_smooth(method = lm, colour="blue")
+```
+
+## Performance
+
+```{r}
+summary(all_tables$perform1)
+```
+
+### Variable Distribution
+
+```{r}
+# Histogram Perform1
+ggplot( data = all_tables, aes(x = perform1)) + geom_histogram(fill = "#4C78A8", color = "white") +
+  labs( x = "Performance") +
+  theme_minimal()
+
+# check with Boxplot
+ggplot(data = performance_labeled, aes(x = perform1)) + 
+  geom_boxplot(fill = "#4C78A8") + 
+  labs( x = "Performance") +
+  scale_y_discrete() + 
+  theme_minimal()
+# some positive outliers, a lot of negative ones
+
+```
+
+### Summary Table
+
+```{r}
+# Create Summary Table
+collapse_factor <- function(x) {
+  x <- x[!is.na(x)]                     # remove NAs
+  if (length(x) == 0) {                 # if all missing
+    return(factor(NA, levels = levels(x)))
+  } else {
+    return(factor(x[1], levels = levels(x)))  # keep factor type
+  }
+}
+
+# Main pipeline
+performance_groups_all <- all_tables %>%
+  filter(!is.na(gender)) %>%            # keep only rows with valid gender
+  group_by(personid) %>%
+  summarise(
+    avg_performance = mean(perform1, na.rm = TRUE),
+    across(where(is.factor), collapse_factor),  # take one value per factor column
+    .groups = "drop"
+  ) %>%
+  mutate(
+    perf_group = case_when(
+      avg_performance >= 0.5  ~ "Top performer",
+      avg_performance <= -0.5 ~ "Low performer",
+      TRUE                    ~ "Average performer"
+    )
+  )
+```
+
+### Perform / Phonecallraw
+
+#### Variable Relationships
+
+```{r}
+#Variable Relationship
+# Scatterplot Perform and Phonecallraw
+plot.scatter_performance_phonecallraw <-  ggplot(data = all_tables
+                                    , aes(x = perform1, y = phonecallraw)) +
+  geom_point(size = 1) +
+  theme_few() +
+  labs(  x = "Performance"
+         , y = "Phonecalls"
+         , title = "Relationship between Performance and Phonecalls") +
+  theme(title = element_text(size = 8)) +
+  theme_minimal()
+
+# Add regression Line
+plot.scatter_performance_phonecallraw + stat_smooth(method = lm, colour="blue")
+```
+
+#### Correlation Table
+
+```{r}
+
+cor_matrix_performance_Phonecallraw <- all_tables %>% 
+  select(perform1, phonecallraw)%>% # 
+  correlate(diagonal = 1)
+
+# Format table for a professional presentation
+cor_matrix_performance_Phonecallraw %>%
+  rearrange() %>%              # rearrange by correlations
+  shave() %>%                  # Shave off the upper triangle for a clean result
+  fashion(decimals = 3)        # Clean presentation
+```
+
+The correlation between performance and phone calls is almost perfect (r = 0.95). This most likely reflects how the performance measure is constructed, since it is largely based on call volume, rather than an independent finding.
+
+### Performance / Homethatweek
+
+#### Distribution
+
+```{r}
+all_tables %>%
+  filter(!is.na(homethatweek), !is.na(perform1)) %>% 
+  ggplot(aes(x = homethatweek, y = perform1, fill = homethatweek)) + 
+  geom_boxplot() +
+  stat_summary(fun = mean, geom = "point", size = 3, shape = 23) +
+  labs(title = "Performance by Homethatweek"
+         , x = "homethatweek"
+         , y = "Performance") +
+  theme_minimal()
+```
+
+#### T.Test
+
+–\> Hypothesis: H0 = "Performance" is not influenced by "homethatweek"
+
+```{r}
+# t.test if the mean performance is better at home or not at home
+tt_home <- t.test(perform1 ~ homethatweek, data = all_tables, alternative = "less")
+tt_home
+```
+
+–\> `r h0_decision(tt_home)` (p = `r p_fmt(tt_home)`)
+
+Mean weekly performance: not home `r round(tt_home$estimate[1], 3)`, home `r round(tt_home$estimate[2], 3)`.
+
+### Phonecalls / Homethatweek
+
+```{r}
+all_tables %>%
+  filter(!is.na(homethatweek), !is.na(phonecall)) %>% 
+  ggplot(aes(x = homethatweek, y = phonecall, fill = homethatweek)) + 
+  geom_boxplot() +
+  stat_summary(fun = mean, geom = "point", size = 3, shape = 23) +
+  labs(title = "Phonecall by Homethatweek"
+         , x = "homethatweek"
+         , y = "Phonecall") +
+  theme_minimal()
+```
+
+#### T.Test
+
+–\> Hypothesis: H0 = "Phonecall" is not influenced by "homethatweek"
+
+```{r}
+tt_calls <- t.test(phonecall ~ homethatweek, data = all_tables, alternative = "less")
+tt_calls
+```
+
+–\> `r h0_decision(tt_calls)` (p = `r p_fmt(tt_calls)`)
+
+Mean weekly calls: not home `r round(tt_calls$estimate[1], 3)`, home `r round(tt_calls$estimate[2], 3)`.
+
+### Performance / Logdaysworked
+
+#### Correlation Table
+
+```{r}
+
+cor_matrix_performance_logdaysworked <- all_tables %>% 
+  select(perform1, logdaysworked)%>% # 
+  correlate(diagonal = 1)
+
+# Format table for a professional presentation
+cor_matrix_performance_logdaysworked %>%
+  rearrange() %>%              # rearrange by correlations
+  shave() %>%                  # Shave off the upper triangle for a clean result
+  fashion(decimals = 3)        # Clean presentation
+
+```
+
+The correlation table shows a moderate positive correlation between performance and logdaysworked (r = 0.47).
+
+#### Variable Relationship - Scatter plot
+
+```{r}
+# Visualization of the Correlation
+plot.scatter_performance_logdaysworked <-  ggplot(data = all_tables
+                                                 , aes(x = perform1, y = logdaysworked)) +
+  geom_point(size = 1) +
+  theme_few() +
+  labs(  x = "Performance"
+         , y = "Logdaysworked"
+         , title = "Relationship between Performance and Days worked") +
+  theme(title = element_text(size = 8)) +
+  theme_minimal()
+
+# Add regression Line
+plot.scatter_performance_logdaysworked + stat_smooth(method = lm, colour="blue")
+```
+
+The scatter plot shows a positive relationship between performance and logdaysworked.
+
+### Performance / Exhaustion
+
+#### Correlation Table
+
+```{r}
+cor_matrix_performance_exhaustion <- all_tables %>% 
+  select(perform1, exhaustion, negative, positive)%>% # 
+  correlate(diagonal = 1)
+
+# Format table for a professional presentation
+cor_matrix_performance_exhaustion %>%
+  rearrange() %>%              # rearrange by correlations
+  shave() %>%                  # Shave off the upper triangle for a clean result
+  fashion(decimals = 3)        # Clean presentation
+
+```
+
+There is no real correlation between Performance and Exhaustion.
+
+### Performance / Base Wage
+
+#### Variable Relationship - Scatter plot
+
+```{r}
+avg_df <- all_tables %>%
+  group_by(year_month) %>%
+  summarise(
+    avg_base_wage = mean(basewage, na.rm = TRUE),
+    avg_performance = mean(perform1, na.rm = TRUE)
+  )
+
+
+ggplot(avg_df, aes(x = avg_base_wage, y = avg_performance)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", colour="blue") +
+  labs(
+    title = "Average Performance vs Average Base Wage",
+    subtitle = "By Year-Month",
+    x = "Average Base Wage (€)",
+    y = "Average Performance"
+  ) +
+  theme_minimal()
+```
+
+The scatter plot compares monthly averages. At the individual level, the correlation between base wage and performance is close to zero (r = -0.02), so the monthly pattern should not be read as a link between individual pay and performance.
+
+### Performance / Gross Wage
+
+#### Variable Relationship - Scatter plot
+
+```{r}
+avg_df <- all_tables %>%
+  group_by(year_month) %>%
+  summarise(
+    avg_gross_wage = mean(grosswage, na.rm = TRUE),
+    avg_performance = mean(perform1, na.rm = TRUE)
+  )
+
+
+ggplot(avg_df, aes(x = avg_gross_wage, y = avg_performance)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", colour="blue") +
+  labs(
+    title = "Average Performance vs Average Gross Wage",
+    subtitle = "By Year-Month",
+    x = "Average Gross Wage (€)",
+    y = "Average Performance"
+  ) +
+  theme_minimal()
+
+```
+
+As with base wage, the plot shows monthly averages and does not reflect the individual level relationship.
+
+#### Correlation Matrix
+
+```{r}
+cor_matrix_2 <- all_tables %>% 
+  select(perform1, grosswage) %>% 
+  correlate(diagonal = 1)
+
+# Format table
+cor_matrix_2 %>%
+  rearrange() %>% 
+  shave() %>% 
+  fashion(decimals = 3)
+
+```
+
+At the individual level there is practically no correlation between performance and gross wage (r = 0.01).
+
+### Performance / Bonus
+
+#### Correlation
+
+```{r}
+cor_matrix_performance_bonus <- all_tables %>% 
+  select(perform1, basewage, grosswage, bonustotal)%>% # 
+  correlate(diagonal = 1)
+
+# Format table for a professional presentation
+cor_matrix_performance_bonus %>%
+  rearrange() %>%              # rearrange by correlations
+  shave() %>%                  # Shave off the upper triangle for a clean result
+  fashion(decimals = 3)        # Clean presentation
+```
+
+The correlation table shows a weak positive correlation between performance and bonus (r = 0.25), while base and gross wage are unrelated to performance.
+
+#### Variable Relationship - Scatter plot
+
+```{r}
+# Scatterplot Performance - Bonus
+plot.scatter_performance_bonus <-  ggplot(data = all_tables
+                                          , aes(x = perform1, y = bonustotal)) +
+  geom_point(size = 1) +
+  theme_few() +
+  labs(  x = "Performance"
+         , y = "Bonus"
+         , title = "Relationship between Performance and Bonus") +
+  theme(title = element_text(size = 8)) +
+  theme_minimal()
+
+# Add regression Line
+plot.scatter_performance_bonus + stat_smooth(method = lm, colour="blue")
+```
+
+The scatter plot confirms the weak positive relationship between bonus and performance.
+
+### Performance / Age
+
+#### Correlation Table
+
+```{r}
+cor_matrix_performance_age <- all_tables %>% 
+  select(perform1, age)%>% # 
+  correlate(diagonal = 1)
+
+# Format table for a professional presentation
+cor_matrix_performance_age %>%
+  rearrange() %>%              # rearrange by correlations
+  shave() %>%                  # Shave off the upper triangle for a clean result
+  fashion(decimals = 3)        # Clean presentation
+```
+
+–\> Only a very weak correlation between performance and age (r = 0.08).
+
+#### Variable Relationship - Scatter plot
+
+```{r}
+plot.scatter_performance_age_mean <-  ggplot(data = Mean_Personid
+                                             , aes(x = mean_perform1, y = mean_age)) +
+  geom_point(size = 1) +
+  theme_few() +
+  labs(  x = "Performance"
+         , y = "age"
+         , title = "Relationship between Performance and age") +
+  theme(title = element_text(size = 8)) +
+  theme_minimal()
+
+# Add regression Line
+plot.scatter_performance_age_mean + stat_smooth(method = lm, colour="blue")
+```
+
+**Home Performance vs. Age**
+
+```{r}
+# Bar chart Performance by Age (home weeks only)
+# 1) Prepare data: filter home only, valid age & performance
+df_home <- all_tables %>%
+  filter(homethatweek == "home",
+         !is.na(age),
+         !is.na(perform1))
+
+df_summary <- df_home %>%
+  mutate(age_group = age) %>%
+  group_by(age_group) %>%
+  summarise(
+    n = dplyr::n(),
+    mean_performance = mean(perform1, na.rm = TRUE),
+    sd = sd(perform1, na.rm = TRUE),
+    se = sd / sqrt(n),
+    ci95 = 1.96 * se,
+    .groups = "drop"
+  )
+
+
+ggplot(df_summary, aes(x = age_group, y = mean_performance)) +
+  geom_col(fill = "steelblue", color = "white") +
+  labs(
+    title = "Average Performance by Age Group (Home Only)",
+    x = "Age Group",
+    y = "Average Performance (perform1)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle =45,hjust=1))
+```
+
+The chart shows average performance in work-from-home weeks for each age.
+
+### Performance / Quit
+
+#### Variable Relationship - Box plot
+
+```{r}
+all_tables %>% 
+filter(!is.na(quitjob), !is.na(perform1)) %>%
+  ggplot(aes(x = quitjob, y = perform1, fill = quitjob)) +
+  geom_boxplot() +
+    stat_summary(fun = mean, geom = "point", size = 3, shape = 23) +
+  labs(
+    title = "Performance by Quit Status",
+    x = "Quit Status",
+    y = "Performance Score"
+  ) +
+  theme_minimal()
+```
+
+#### T.Test
+
+–\> Hypothesis: H0 = Employees who quit and employees who stayed have the same average performance
+
+```{r}
+tt_quit <- t.test(avg_performance ~ quitjob, data = person_level)
+tt_quit
+```
+
+–\> `r h0_decision(tt_quit)` (p = `r p_fmt(tt_quit)`)
+
+Mean performance: stayed `r round(tt_quit$estimate[1], 3)`, quit `r round(tt_quit$estimate[2], 3)`.
+
+**Bar chart showing number of people by Quit status and performance group**
+
+```{r}
+performance_groups_all %>%
+  ggplot(aes(x = perf_group, fill = quitjob)) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "Distribution of Performance Groups by Quit Status",
+    x = "Performance Group",
+    y = "Number of Employees"
+  ) +
+  theme_minimal()
+```
+
+### Performance / Promotion
+
+#### Variable Relationship - Box plot
+
+```{r}
+all_tables %>%
+  filter(!is.na(promote_switch), !is.na(perform1)) %>%
+  ggplot(aes(x = promote_switch, y = perform1, fill = promote_switch)) +
+  geom_boxplot() +
+  stat_summary(fun = mean, geom = "point", size = 3, shape = 23) +
+  labs(
+    title = "Performance by Promotion Status",
+    x = "Promotion Status",
+    y = "Performance Score"
+  ) +
+  theme_minimal()
+```
+
+#### T.Test
+
+–\> Hypothesis: H0 = Promoted and not promoted employees have the same average performance
+
+```{r}
+tt_promo <- t.test(avg_performance ~ promote_switch, data = person_level)
+tt_promo
+```
+
+–\> `r h0_decision(tt_promo)` (p = `r p_fmt(tt_promo)`)
+
+Mean performance: not promoted `r round(tt_promo$estimate[1], 3)`, promoted `r round(tt_promo$estimate[2], 3)`.
+
+**Bar chart showing number of people by promotion status and performance group**
+
+```{r}
+performance_groups_all %>%
+  ggplot(aes(x = perf_group, fill = promote_switch)) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "Distribution of Performance Groups by Promotion Status",
+    x = "Performance Group",
+    y = "Number of Employees"
+  ) +
+  theme_minimal()
+```
+
+### Performance / Education
+
+#### Variable Relationship - Box plot
+
+```{r}
+all_tables %>% 
+  filter(!is.na(high_educ), !is.na(perform1)) %>% 
+  group_by(personid) %>% 
+  ggplot(aes(x = high_educ, y = perform1, fill = high_educ)) + 
+  geom_boxplot() +
+  stat_summary(fun = mean, geom = "point", size = 3, shape = 23) +
+  labs(
+    title = "Performance by Education",
+    x = "Education",
+    y = "Performance Score"
+  ) +
+  theme_minimal()
+```
+
+#### T.Test
+
+–\> Hypothesis: H0 = Employees with and without high education have the same average performance
+
+```{r}
+tt_educ <- t.test(avg_performance ~ high_educ, data = person_level)
+tt_educ
+```
+
+–\> `r h0_decision(tt_educ)` (p = `r p_fmt(tt_educ)`)
+
+Mean performance: no high education `r round(tt_educ$estimate[1], 3)`, high education `r round(tt_educ$estimate[2], 3)`.
+
+**Bar chart showing number of people by Education and performance group**
+
+```{r}
+performance_groups_all %>%
+  ggplot(aes(x = perf_group, fill = high_educ)) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "Distribution of Performance Groups by Education",
+    x = "Performance Group",
+    y = "Number of Employees"
+  ) +
+  theme_minimal()
+```
+
+### Performance / Tenure
+
+#### Variable Relationship - Scatter plot
+
+```{r}
+all_tables %>%
+  filter(!is.na(tenure), !is.na(perform1)) %>%
+  ggplot(aes(x = tenure, y = perform1)) +
+  geom_point(alpha = 0.4) +        # scatter points
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +  # regression line
+  labs(
+    title = "Relationship between Tenure and Performance",
+    x = "Tenure (months)",
+    y = "Performance Score"
+  ) +
+  theme_minimal()
+```
+
+The scatter plot shows a very weak positive relationship between tenure and performance (r = 0.11).
+
+### Performance / Gender
+
+#### Variable Relationship - Box plot
+
+```{r}
+all_tables %>%
+  filter(!is.na(gender), !is.na(perform1)) %>%
+  ggplot(aes(x = gender, y = perform1, fill = gender)) +
+  geom_boxplot() +
+  stat_summary(fun = mean, geom = "point", size = 3, shape = 23) +
+  labs(
+    title = "Performance by Gender",
+    x = "Gender",
+    y = "Performance Score"
+  ) +
+  theme_minimal()
+```
+
+#### T.Test
+
+–\> Hypothesis: H0 = Female and male employees have the same average performance
+
+```{r}
+tt_gender <- t.test(avg_performance ~ gender, data = person_level)
+tt_gender
+```
+
+–\> `r h0_decision(tt_gender)` (p = `r p_fmt(tt_gender)`)
+
+Mean performance: female `r round(tt_gender$estimate[1], 3)`, male `r round(tt_gender$estimate[2], 3)`.
+
+#### Performance / Gender
+
+**Bar chart showing number of people by gender and performance group**
+
+```{r}
+performance_groups_all %>%
+  ggplot(aes(x = perf_group, fill = gender)) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "Distribution of Performance Groups by Gender",
+    x = "Performance Group",
+    y = "Number of Employees"
+  ) +
+  theme_minimal()
+```
+
+The chart compares the number of female and male employees in each performance group.
+
+### Performance Overview
+
+#### Correlation Table
+
+```{r}
+# Select numerical variables
+Performance_numeric_var <- all_tables %>% 
+  select(perform1, phonecallraw, logdaysworked, exhaustion, basewage, grosswage, bonustotal, age, tenure)
+
+# Correlation Table between numerical variables
+correlation_matrix_performance <- correlate(Performance_numeric_var, diagonal = 1)
+
+# Print Table
+correlation_matrix_performance %>%
+  rearrange() %>%              # rearrange by correlations
+  shave() %>%                  # Shave off the upper triangle for a clean result
+  fashion(decimals = 3)        # Clean presentation
+
+# Visualize the correlation matrix
+ggcorr(Performance_numeric_var,
+       label = TRUE,
+       method = c("everything", "pearson"),
+       low = "blue", mid = "white", high = "red",
+       layout.exp = 2,          # increases the distance from text to matrix
+       label_size = 3,
+       hjust = 0.9, vjust = 0.9)
+```
+
+The correlation matrix shows:
+
+-   a very strong correlation between performance and phone calls (r = 0.95), which reflects how performance is measured
+-   a moderate positive correlation with days worked (r = 0.47)
+-   a weak positive correlation with bonus (r = 0.25)
+-   no meaningful correlation with exhaustion, base wage, gross wage, age or tenure (all |r| ≤ 0.11)
+
+## Endperiod
+
+### Cost of Commute
+
+#### Variable Distribution - Histogram
+
+```{r}
+ggplot(all_tables, aes(x = costofcommute)) +
+  geom_histogram(
+    binwidth = 5,                      # adjust bins to your data scale
+    fill = "#4C78A8",
+    color = "white",                    # clean bin borders
+  ) +
+  labs(
+    title = "Distribution of Monthly Commute Cost",
+    x = "Monthly Commute Cost",
+    y = "Number of Employees"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+#### Variable Distribution - Boxplot
+
+```{r}
+ggplot(data = all_tables, aes(x = costofcommute)) + 
+  geom_boxplot( fill ="#4C78A8") + 
+  scale_y_discrete() +
+  theme_minimal()
+
+```
+
+### Cost of Commute / Commute (Time)
+
+#### Variable Relationships - Scatter plot
+
+```{r}
+all_tables %>%
+  filter(!is.na(commute), !is.na(costofcommute)) %>%
+  ggplot(aes(x = commute, y = costofcommute)) +
+  geom_point(alpha = 0.4) +        # scatter points
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +  # regression line
+  labs(
+    title = "Relationship between Commute time and Cost of commute",
+    x = "commute (minutes)",
+    y = "Cost of commute"
+  ) +
+  theme_minimal()
+```
+
+Scatter plot shows that there is a correlation between Cost of commute and commute (minutes).
+
+### Cost of Commute / Quit Job
+
+#### Descriptive Statistics
+
+```{r}
+all_tables %>% 
+  filter(!is.na(quitjob), !is.na(costofcommute)) %>% 
+  group_by(personid) %>% 
+  ggplot(aes(x = quitjob, y = costofcommute, fill = quitjob)) + 
+  geom_boxplot() +
+  labs(
+    title = "Cost of Commute by Quit Status",
+    x = "Quit Status",
+    y = "Cost of Commute"
+  ) +
+  theme_minimal()
+```
+
+#### T.Test
+
+–\> Hypothesis: H0 = Employees who quit and employees who stayed have the same average commute cost
+
+```{r}
+tt_commute <- t.test(costofcommute ~ quitjob, data = person_level)
+tt_commute
+```
+
+–\> `r h0_decision(tt_commute)` (p = `r p_fmt(tt_commute)`)
+
+Mean monthly commute cost: stayed `r round(tt_commute$estimate[1], 2)`, quit `r round(tt_commute$estimate[2], 2)`.
+
+### Cost of Commute / Exhaustion
+
+#### Variable Relationships - Scatter plot
+
+```{r}
+ggplot(all_tables, aes(x = costofcommute, y = exhaustion)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Cost of Commute vs Exhaustion", x = "Cost of Commute", y = "Exhaustion") +
+  theme_minimal()
+```
+
+The scatter plot shows a slight negative correlation.
+
+## Volunteer
+
+### Tenure
+
+#### Tenure / Married
+
+##### Variable Relationship - Box plot
+
+```{r}
+ggplot(summary_volunteer_labeled %>% drop_na(married, tenure),
+       aes(x = married, y = tenure, fill = married)) +
+  geom_boxplot(outlier.alpha = 0.25) +
+  stat_summary(fun = mean, geom = "point", size = 3, shape = 23) +
+  labs(title = "Tenure by Marital Status", x = "Marital status", y = "Tenure (months)") +
+  theme_minimal()
+```
+
+##### T.Test
+
+–\> Hypothesis: H0 = Married and not married employees have the same average tenure
+
+```{r}
+tt_tenure_married <- t.test(tenure ~ married, data = person_level)
+tt_tenure_married
+```
+
+–\> `r h0_decision(tt_tenure_married)` (p = `r p_fmt(tt_tenure_married)`)
+
+Mean tenure in months: not married `r round(tt_tenure_married$estimate[1], 1)`, married `r round(tt_tenure_married$estimate[2], 1)`.
+
+#### Age / Married
+
+##### Variable Relationship - Box plot
+
+```{r}
+ggplot(summary_volunteer_labeled %>% drop_na(married, age),
+       aes(x = married, y = age, fill = married)) +
+  geom_boxplot(outlier.alpha = 0.25) +
+  stat_summary(fun = mean, geom = "point", size = 3, shape = 23) +
+  labs(title = "Age by Marital Status", x = "Marital status", y = "Age (years)") +
+  theme_minimal()
+```
+
+##### T.Test
+
+–\> Hypothesis: H0 = Married and not married employees have the same average age
+
+```{r}
+tt_age_married <- t.test(age ~ married, data = person_level)
+tt_age_married
+```
+
+–\> `r h0_decision(tt_age_married)` (p = `r p_fmt(tt_age_married)`)
+
+Mean age: not married `r round(tt_age_married$estimate[1], 1)`, married `r round(tt_age_married$estimate[2], 1)`.
+
+#### Tenure / Age
+
+##### Variable Relationship - Scatter plot
+
+```{r}
+ggplot(all_tables, aes(x = tenure, y = age)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Relationship between Tenure and Age", x = "Tenure (months)", y = "Age") +
+  theme_minimal()
+```
+
+The scatter plot shows a very high correlation between Tenure and Age.
+
+Since tenure and age are closely related, differences in tenure by marital status may largely reflect differences in age.
+
+#### Tenure / Exhaustion
+
+##### Variable Relationship - Scatter plot
+
+```{r}
+ggplot(all_tables, aes(x = tenure, y = exhaustion)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Tenure vs Exhaustion", x = "Tenure (months)", y = "Exhaustion") +
+  theme_minimal()
+```
+
+This Plot shows that there only is a slight correlation between Exhaustion and Tenure.
+
+#### Tenure / Promotion
+
+##### Variable Relationship - Box plot
+
+```{r}
+ggplot(person_level %>% drop_na(promote_switch, tenure),aes(x = promote_switch, y = tenure, fill = promote_switch)) +
+  geom_boxplot(outlier.alpha = 0.25) +
+  stat_summary(fun = mean, geom = "point", size = 3, shape = 23) +
+  labs(title = "Tenure by Promotion Status", x = "Promotion Status", y = "Tenure (months)") +
+  theme_minimal()
+```
+
+#### T.Test
+
+–\> Hypothesis: H0 = Promoted and not promoted employees have the same average tenure
+
+```{r}
+tt_tenure_promo <- t.test(tenure ~ promote_switch, data = person_level)
+tt_tenure_promo
+```
+
+–\> `r h0_decision(tt_tenure_promo)` (p = `r p_fmt(tt_tenure_promo)`)
+
+Mean tenure in months: not promoted `r round(tt_tenure_promo$estimate[1], 1)`, promoted `r round(tt_tenure_promo$estimate[2], 1)`.
